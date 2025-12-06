@@ -1,0 +1,266 @@
+// Prisma schema for Unified Inbox
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model (Better Auth integration)
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  emailVerified Boolean @default(false)
+  name      String?
+  image     String?
+  role      UserRole @default(VIEWER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Better Auth relations
+  accounts      account[]
+  sessions      session[]
+
+  // Application relations
+  teamMemberships   TeamMember[]
+  conversations     Conversation[] @relation("ConversationAssignee")
+  notes             Note[]
+  sentMessages      Message[]      @relation("MessageSender")
+  scheduledMessages ScheduledMessage[]
+
+  @@map("users")
+}
+
+// Better Auth required models (using lowercase model names as Better Auth expects)
+model account {
+  id                String  @id @default(cuid())
+  userId            String
+  accountId         String
+  providerId        String
+  accessToken       String? @db.Text
+  refreshToken      String? @db.Text
+  idToken           String? @db.Text
+  accessTokenExpiresAt DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope             String?
+  password          String? @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@map("accounts")
+}
+
+model session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  userId    String
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([identifier, value])
+  @@map("verifications")
+}
+
+enum UserRole {
+  VIEWER
+  EDITOR
+  ADMIN
+}
+
+// Team model (multi-tenant support)
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  members       TeamMember[]
+  conversations Conversation[]
+  contacts      Contact[]
+
+  @@map("teams")
+}
+
+// Team membership
+model TeamMember {
+  id        String   @id @default(cuid())
+  userId    String
+  teamId    String
+  role      UserRole @default(VIEWER)
+  joinedAt  DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, teamId])
+  @@map("team_members")
+}
+
+// Contact model (normalized across channels)
+model Contact {
+  id          String   @id @default(cuid())
+  teamId      String?
+  phoneNumber String?  @unique
+  email       String?
+  firstName   String?
+  lastName    String?
+  company     String?
+  metadata    Json?    // For channel-specific data (e.g., Twitter handle, Facebook ID)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  team         Team?         @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  conversations Conversation[]
+  notes        Note[]
+
+  @@map("contacts")
+}
+
+// Conversation model (threads grouped by contact)
+model Conversation {
+  id              String              @id @default(cuid())
+  contactId       String
+  teamId          String?
+  assignedToId    String?
+  status          ConversationStatus  @default(OPEN)
+  lastMessageAt   DateTime            @default(now())
+  unreadCount     Int                 @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  // Relations
+  contact            Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  team               Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  assignedTo         User?            @relation("ConversationAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  messages           Message[]
+  scheduledMessages  ScheduledMessage[]
+
+  @@unique([contactId, teamId])
+  @@index([status, lastMessageAt])
+  @@map("conversations")
+}
+
+enum ConversationStatus {
+  OPEN
+  ARCHIVED
+  CLOSED
+}
+
+// Message model (unified across channels)
+model Message {
+  id              String          @id @default(cuid())
+  conversationId  String
+  senderId        String?         // User who sent (null for inbound)
+  channel         MessageChannel
+  direction       MessageDirection
+  body            String?
+  mediaUrls       String[]        // Array of media URLs
+  externalId      String?         @unique // Twilio message SID
+  status          MessageStatus   @default(PENDING)
+  errorMessage    String?
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  readAt          DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Relations
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User?        @relation("MessageSender", fields: [senderId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([externalId])
+  @@map("messages")
+}
+
+enum MessageChannel {
+  SMS
+  WHATSAPP
+  EMAIL
+  TWITTER
+  FACEBOOK
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// Note model (simple shared notes)
+model Note {
+  id          String   @id @default(cuid())
+  contactId   String
+  userId      String
+  content     String
+  isPrivate   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([contactId, createdAt])
+  @@map("notes")
+}
+
+// ScheduledMessage model
+model ScheduledMessage {
+  id             String          @id @default(cuid())
+  conversationId String
+  senderId       String
+  channel        MessageChannel
+  body           String?
+  mediaUrls      String[]
+  scheduledFor   DateTime
+  status         ScheduledStatus @default(PENDING)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  // Relations
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([status, scheduledFor])
+  @@map("scheduled_messages")
+}
+
+enum ScheduledStatus {
+  PENDING
+  SENT
+  CANCELLED
+}
